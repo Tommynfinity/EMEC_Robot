@@ -1,0 +1,29 @@
+Report 20/01/2026 - Lavoro svolto in sede EMEC 4
+
+- Verifica del nuovo algoritmo Lock_Free_Multiple_Producer sulla VMSFM manuale: ESITO POSITIVO
+	Lotto svolto dall'operatore emec: 104 pezzi - 96 PASS : 8 FAIL
+	Delle 8 FAIL, l'operatore ha dato conferma di reali scarti
+	
+- Modifica sul posto della VMSFM automatica, visto l'esito positivo dell'algoritmo nella base di collaudo manuale
+	Modifica effettuata con successo: testata 1 sola scheda, una sola volta, trovata nelle scatole vicino alla zona del robot, non allineata 
+	con la versione firmware attuale ( 3.1.3 ) ma con la precedente versione ( 3.1.2 ). 
+	ESITO: PASS, PROTOCOLLO CMD 9A: PRESENTE.
+	Lettura DutyCicle (TON): ± 20 micro, %^Errori_Campionamento: 0 ( Risultato identico nella VMSFM Manuale ). 
+	Si richiede verifica su lotti numerosi.
+	
+	Si richiama l'attenzione sulle schede con problema Firmware bloccato nel test CAL_1V, il problema e' ancora presente.
+	
+- Fatto presente all'operatore ALCA dell'implementazione del fine ricetta e della problematica del robot riguardante essa. 
+  Riferito che la verifica non era ancora stata effettuata.
+	
+- Concordato con operatore ALCA procedura per la gestione etichette, di seguito un diagramma di flusso da verificare e 
+  controconfermare da parte dell'operatore ALCA presente in quel momento:
+  
+  = fare diagramma di flusso = 
+  
+- Riferito stato avanzamento con relativa pubblicazione in data 21-01 ( settimana 04/52 ) della richiesta del popup di 
+  notifica MES all'operatore del robot. Nella giornata di domani verra' apportata questa modifica sicuramente.
+  
+
+
+	
