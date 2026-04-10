@@ -1,3 +1,135 @@
+private void AvviaNuovoCiclo(SessioneTest sessione, Dashboard mainForm)
+{
+    LogInfo(nameof(AvviaNuovoCiclo),
+        $"ENTER idBasetta={sessione?.IdBasetta} identification={sessione?.Identification} totaleTestati={sessione?.TotaleTestati} pezziDaCollaudare={sessione?.PezziDaCollaudare}");
+
+    try
+    {
+        if (sessione == null)
+        {
+            LogWarn(nameof(AvviaNuovoCiclo), "Sessione nulla.");
+            return;
+        }
+
+        Console.WriteLine($"🔁 [{portName}] Avvio nuovo ciclo di test ({sessione.TotaleTestati + 1}/{sessione.PezziDaCollaudare})");
+        LogInfo(nameof(AvviaNuovoCiclo),
+            $"Avvio nuovo ciclo di test ({sessione.TotaleTestati + 1}/{sessione.PezziDaCollaudare})");
+
+        var sequencer = CollaudoManager.Istanza.Get(sessione.IdBasetta)?.GetSequencer();
+        TimeSpan time = DateTime.Now.TimeOfDay;
+
+        if (sequencer == null)
+        {
+            LogError(nameof(AvviaNuovoCiclo), $"Sequencer non trovato per {sessione.IdBasetta}");
+            Console.WriteLine($"❌ Sequencer non trovato per {sessione.IdBasetta}");
+            return;
+        }
+
+        bool okRemoved = false;
+        ushort registroRemoved = 0;
+        string regName = string.Empty;
+
+        switch (sessione.IdBasetta)
+        {
+            case "VCL":
+                registroRemoved = Registers.VCL_Removed;
+                regName = nameof(Registers.VCL_Removed);
+                break;
+
+            case "VMSMF":
+                registroRemoved = Registers.VMSMF_Removed;
+                regName = nameof(Registers.VMSMF_Removed);
+                break;
+
+            case "VCO":
+                registroRemoved = Registers.VCO_Removed;
+                regName = nameof(Registers.VCO_Removed);
+                break;
+
+            case "FCO":
+                registroRemoved = Registers.FCO_Removed;
+                regName = nameof(Registers.FCO_Removed);
+                break;
+
+            default:
+                LogWarn(nameof(AvviaNuovoCiclo), $"IdBasetta non gestito: {sessione.IdBasetta}");
+                return;
+        }
+
+        LogInfo(nameof(AvviaNuovoCiclo),
+            $"Attesa registro removed. basetta={sessione.IdBasetta} registro={registroRemoved} ({regName}) valoreAtteso=1 timeout=3h");
+
+        okRemoved = RobotController.Instance.AttendiValoreRegistro(
+            registroRemoved,
+            1,
+            (int)TimeSpan.FromHours(3).TotalMilliseconds);
+
+        try
+        {
+            var valoreLetto = RobotController.Instance.ReadRegister(registroRemoved);
+            string valoreTxt = valoreLetto == null ? "null" : string.Join(",", valoreLetto);
+
+            LogInfo(nameof(AvviaNuovoCiclo),
+                $"Lettura finale registro removed. registro={registroRemoved} valore=[{valoreTxt}]");
+
+            Console.WriteLine($"Registro {registroRemoved}: {valoreTxt}");
+        }
+        catch (Exception exRead)
+        {
+            LogError(nameof(AvviaNuovoCiclo),
+                $"Errore lettura finale registro removed. registro={registroRemoved}", exRead);
+        }
+
+        if (okRemoved)
+        {
+            LogInfo(nameof(AvviaNuovoCiclo),
+                $"Condizione soddisfatta su registro={registroRemoved}. Creo nuova sequenza.");
+
+            var nuovaSequenza = SequenzaFactory.CreaPerSessione(sessione);
+
+            if (nuovaSequenza == null)
+            {
+                LogWarn(nameof(AvviaNuovoCiclo), "SequenzaFactory ha restituito null.");
+                return;
+            }
+
+            sequencer.CaricaSequenza(nuovaSequenza);
+            LogInfo(nameof(AvviaNuovoCiclo), "Nuova sequenza caricata.");
+
+            var controller = CollaudoManager.Istanza.Get(sessione.IdBasetta);
+            if (controller == null)
+            {
+                LogWarn(nameof(AvviaNuovoCiclo), $"Controller non trovato per basetta={sessione.IdBasetta}");
+                return;
+            }
+
+            sequencer.EseguiProssimoStep(controller.SendJson);
+            LogInfo(nameof(AvviaNuovoCiclo), "EseguiProssimoStep invocato.");
+
+            Console.WriteLine($"✅ [{portName}] Nuovo ciclo avviato per {sessione.IdBasetta}");
+        }
+        else
+        {
+            LogWarn(nameof(AvviaNuovoCiclo),
+                $"Condizione NON soddisfatta entro il timeout. registro={registroRemoved}");
+
+            Console.WriteLine("🔴 Condizione non soddisfatta entro il tempo limite");
+
+            mainForm?.MostraErrore(
+                $"{time.Hours}:{time.Minutes}:{time.Seconds} - REG_{registroRemoved}: 0 S_ABORTED");
+
+            mainForm?.AbortSessionRobotError(sessione.IdBasetta);
+        }
+
+        LogInfo(nameof(AvviaNuovoCiclo), "EXIT OK");
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(AvviaNuovoCiclo), "FAIL", ex);
+        throw;
+    }
+}
+
 
 private void HandlePassResult(SessioneTest sessione, RisultatiTest risultati, Dashboard mainForm)
 {
