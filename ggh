@@ -1,3 +1,205 @@
+
+private void HandlePassResult(SessioneTest sessione, RisultatiTest risultati, Dashboard mainForm)
+{
+    LogInfo(nameof(HandlePassResult),
+        $"ENTER idBasetta={sessione?.IdBasetta} identification={sessione?.Identification}");
+
+    try
+    {
+        sessione.RetestCount = 0;
+        sessione.PezziOK++;
+
+        sessione.RESULT_COIL = risultati.CoilTon.ToString();
+        sessione.RESULT_FREQUENZY = risultati.Freq.ToString();
+        sessione.RESULT_OTHER = risultati.Other() ? "OK" : "NOK";
+
+        LogInfo(nameof(HandlePassResult),
+            $"Sessione aggiornata PASS. PezziOK={sessione.PezziOK} RetestCount={sessione.RetestCount}");
+
+        mainForm?.AggiornaRisultato(true, sessione, risultati);
+        mainForm?.AggiornaContatore(
+            $"X{sessione.PezziDaCollaudare - sessione.TotaleTestati}",
+            sessione.Identification);
+
+        LogInfo(nameof(HandlePassResult), "UI aggiornata per PASS.");
+
+        SaveRecordOnDB(sessione, risultati);
+        LogInfo(nameof(HandlePassResult), "Record salvato su DB.");
+
+        StampResultDEBUG(risultati);
+
+        QueueEtichette.Istanza.AggiungiEtichetta(sessione.IdBasetta, sessione.PartNumber);
+        LogInfo(nameof(HandlePassResult),
+            $"Etichetta accodata. idBasetta={sessione.IdBasetta} partNumber={sessione.PartNumber}");
+
+        Task.Run(() =>
+        {
+            try
+            {
+                LogInfo(nameof(HandlePassResult), "Avvio controllo stampante etichetta.");
+
+                string motivo;
+                bool ok = RawPrinterHelper.CheckStampanteZpl("emec_etichetta", out motivo);
+
+                if (Global.Etichetta_Enable)
+                {
+                    LogInfo(nameof(HandlePassResult), $"Scrittura registro 170 valore={(ok ? 1 : 0)}");
+                    RobotController.Instance.WriteRegister(170, (ushort)(ok ? 1 : 0));
+                }
+                else
+                {
+                    LogInfo(nameof(HandlePassResult), "Stampa etichetta disattivata. Scrittura registro 170 = 0");
+                    RobotController.Instance.WriteRegister(170, 0);
+                }
+
+                if (!ok)
+                {
+                    LogWarn(nameof(HandlePassResult), $"Stampante KO: {motivo}");
+                    mainForm?.MostraErrore("Stampante KO: " + motivo);
+                    Console.WriteLine("Stampante KO: " + motivo);
+                }
+                else if (!Global.Etichetta_Enable)
+                {
+                    LogWarn(nameof(HandlePassResult), "STAMPA ETICHETTA DISATTIVATA");
+                    mainForm?.MostraErrore("STAMPA ETICHETTA DISATTIVATA");
+                }
+                else
+                {
+                    LogInfo(nameof(HandlePassResult), "Controllo stampante OK.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError(nameof(HandlePassResult), "Errore durante controllo stampante.", ex);
+
+                try
+                {
+                    RobotController.Instance.WriteRegister(170, 0);
+                }
+                catch (Exception ex2)
+                {
+                    LogError(nameof(HandlePassResult), "Errore scrittura registro 170 dopo eccezione stampante.", ex2);
+                }
+
+                mainForm?.MostraErrore("Errore check stampante: " + ex.Message);
+                Console.WriteLine("Errore check stampante: " + ex.Message);
+            }
+        });
+
+        LogInfo(nameof(HandlePassResult), "EXIT OK");
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(HandlePassResult), "FAIL", ex);
+        throw;
+    }
+}
+
+
+
+
+
+private void HandleFailResult(SessioneTest sessione, RisultatiTest risultati, Dashboard mainForm)
+{
+    LogInfo(nameof(HandleFailResult),
+        $"ENTER idBasetta={sessione?.IdBasetta} identification={sessione?.Identification} retest={sessione?.RetestCount}");
+
+    try
+    {
+        sessione.RESULT_COIL = risultati.CoilTon.ToString();
+        sessione.RESULT_FREQUENZY = risultati.Freq.ToString();
+        sessione.RESULT_OTHER = risultati.Other() ? "OK" : "NOK";
+
+        LogInfo(nameof(HandleFailResult),
+            $"Risultati aggiornati. coil={sessione.RESULT_COIL} freq={sessione.RESULT_FREQUENZY} other={sessione.RESULT_OTHER}");
+
+        Console.WriteLine($"_retestCount: {sessione.RetestCount}");
+
+        if (sessione.RetestCount < 2)
+        {
+            sessione.RetestCount++;
+
+            LogWarn(nameof(HandleFailResult),
+                $"Retest incrementato. Nuovo valore={sessione.RetestCount}");
+
+            Console.WriteLine($"🔁 Retest in corso ({sessione.RetestCount}/3 tentativi)...");
+
+            mainForm?.AggiornaRisultato(false, sessione, risultati);
+            LogInfo(nameof(HandleFailResult), "UI aggiornata per FAIL con retest.");
+        }
+        else
+        {
+            LogWarn(nameof(HandleFailResult), "Limite retest raggiunto. Salvataggio KO definitivo.");
+
+            SaveRecordOnDB(sessione, risultati);
+            LogInfo(nameof(HandleFailResult), "Record KO salvato su DB.");
+
+            sessione.RetestCount = 0;
+            sessione.PezziKO++;
+
+            LogInfo(nameof(HandleFailResult),
+                $"Sessione aggiornata KO definitivo. PezziKO={sessione.PezziKO} RetestCount={sessione.RetestCount}");
+
+            mainForm?.AggiornaRisultato(false, sessione, risultati);
+            mainForm?.AggiornaContatore(
+                $"X{sessione.PezziDaCollaudare - sessione.TotaleTestati}",
+                sessione.Identification);
+
+            LogInfo(nameof(HandleFailResult), "UI aggiornata per KO definitivo.");
+        }
+
+        StampResultDEBUG(risultati);
+
+        if (!Mode.DEBUG)
+        {
+            bool modbusConnected = RobotController.Instance.IsModbusConnected();
+            LogInfo(nameof(HandleFailResult), $"Mode.DEBUG=false, ModbusConnected={modbusConnected}");
+
+            if (modbusConnected)
+            {
+                LogInfo(nameof(HandleFailResult), $"Scrittura END=2 su basetta={sessione.IdBasetta}");
+
+                switch (sessione.IdBasetta)
+                {
+                    case "VCL":
+                        RobotController.Instance.WriteRegister(Registers.VCL_End, 2);
+                        break;
+
+                    case "VMSMF":
+                        RobotController.Instance.WriteRegister(Registers.VMSMF_End, 2);
+                        break;
+
+                    case "VCO":
+                        RobotController.Instance.WriteRegister(Registers.VCO_End, 2);
+                        break;
+
+                    case "FCO":
+                        RobotController.Instance.WriteRegister(Registers.FCO_End, 2);
+                        break;
+
+                    default:
+                        LogWarn(nameof(HandleFailResult), $"IdBasetta non gestito: {sessione.IdBasetta}");
+                        break;
+                }
+            }
+        }
+
+        LogInfo(nameof(HandleFailResult), "EXIT OK");
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(HandleFailResult), "FAIL", ex);
+        throw;
+    }
+}
+
+
+
+
+
+
+
+
 public SerialPortController(string port, int baudRate)
 {
     portName = port;
