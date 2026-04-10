@@ -1,0 +1,662 @@
+public SerialPortController(string port, int baudRate)
+{
+    portName = port;
+    LogInfo(nameof(SerialPortController), $"ENTER port={port} baudRate={baudRate}");
+
+    serialPort = new SerialPort(port, baudRate, Parity.None, 8, StopBits.One);
+    serialPort.Encoding = Encoding.UTF8;
+    serialPort.DataReceived += new SerialDataReceivedEventHandler(DataReceivedHandler);
+
+    LogInfo(nameof(SerialPortController), "SerialPort inizializzata e DataReceived agganciato.");
+}
+
+public void StopControlloTimeout()
+{
+    controlloTimeoutInCorso = false;
+    LogInfo(nameof(StopControlloTimeout), "Controllo timeout fermato.");
+    Console.WriteLine($"⏹️ Controllo timeout fermato su {portName}");
+}
+
+
+public async void AvviaControlloTimeout()
+{
+    LogInfo(nameof(AvviaControlloTimeout), $"Richiesta avvio. controlloTimeoutInCorso={controlloTimeoutInCorso}");
+
+    if (controlloTimeoutInCorso)
+    {
+        LogWarn(nameof(AvviaControlloTimeout), "Richiesta ignorata: controllo timeout già attivo.");
+        return;
+    }
+
+    controlloTimeoutInCorso = true;
+
+    _ = Task.Run(async () =>
+    {
+        LogInfo(nameof(AvviaControlloTimeout), "Task controllo timeout avviato.");
+
+        while (controlloTimeoutInCorso)
+        {
+            try
+            {
+                LogDebug(nameof(AvviaControlloTimeout), "Loop controllo timeout.");
+                sequencer.ControllaTimeoutStep(SendJson, GestisciFallimentoSessione);
+                await Task.Delay(500);
+            }
+            catch (Exception ex)
+            {
+                LogError(nameof(AvviaControlloTimeout), "Errore nel loop di controllo timeout.", ex);
+            }
+        }
+
+        LogInfo(nameof(AvviaControlloTimeout), "Task controllo timeout terminato.");
+    });
+}
+
+
+private void GestisciFallimentoSessione()
+{
+    controlloTimeoutInCorso = false;
+    LogWarn(nameof(GestisciFallimentoSessione), "Sessione fallita. Timeout disattivato.");
+
+    Console.WriteLine($"Sessione fallita su {portName}. Chiudo.");
+
+    var mainForm = Application.OpenForms["Dashboard"] as Dashboard;
+    TimeSpan time = DateTime.Now.TimeOfDay;
+
+    mainForm?.MostraErrore($"{time.Hours}:{time.Minutes}:{time.Seconds} -  ERR_NO_RESPONSE: {portName} .");
+}
+
+public void SerialFlush()
+{
+    LogInfo(nameof(SerialFlush), $"ENTER IsOpen={serialPort?.IsOpen}");
+
+    if (serialPort.IsOpen)
+    {
+        try
+        {
+            int beforeBytes = serialPort.BytesToRead;
+            LogDebug(nameof(SerialFlush), $"BytesToRead before flush={beforeBytes}");
+
+            serialPort.DiscardInBuffer();
+            serialPort.DiscardOutBuffer();
+
+            while (serialPort.BytesToRead > 0)
+            {
+                string discarded = serialPort.ReadExisting();
+                LogDebug(nameof(SerialFlush), $"Discarded chunk={Sanitize(discarded)}");
+            }
+
+            LogInfo(nameof(SerialFlush), "Seriale pulita.");
+            Console.WriteLine("Seriale pulita");
+        }
+        catch (Exception ex)
+        {
+            LogError(nameof(SerialFlush), "Errore nel flush seriale.", ex);
+            Console.WriteLine($"❌ Errore nel flush seriale: {ex.Message}");
+        }
+    }
+    else
+    {
+        LogWarn(nameof(SerialFlush), "Richiesta flush su seriale chiusa.");
+    }
+}
+
+
+
+public bool Start()
+{
+    LogInfo(nameof(Start), $"ENTER IsOpen={serialPort?.IsOpen}");
+
+    try
+    {
+        if (!serialPort.IsOpen)
+        {
+            LogInfo(nameof(Start), $"Apertura porta seriale {portName}");
+            serialPort.Open();
+        }
+
+        serialPort.DiscardOutBuffer();
+
+        LogInfo(nameof(Start), $"Porta aperta con successo. IsOpen={serialPort.IsOpen}");
+        return true;
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(Start), $"Errore apertura porta seriale {portName}", ex);
+
+        var mainForm = Application.OpenForms["Dashboard"] as Dashboard;
+        TimeSpan time = DateTime.Now.TimeOfDay;
+        mainForm?.MostraErrore($"{time.Hours}:{time.Minutes}:{time.Seconds} - ERR_COM_NOT_FOUND: {portName}");
+
+        return false;
+    }
+}
+
+public void Stop()
+{
+    LogInfo(nameof(Stop), $"ENTER IsOpen={serialPort?.IsOpen}");
+
+    try
+    {
+        if (serialPort.IsOpen)
+        {
+            serialPort.Close();
+            LogInfo(nameof(Stop), "Porta seriale chiusa.");
+        }
+        else
+        {
+            LogWarn(nameof(Stop), "Stop richiesto ma porta già chiusa.");
+        }
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(Stop), "Errore chiusura porta seriale.", ex);
+    }
+}
+
+public void SendJson(Package pack)
+{
+    LogInfo(nameof(SendJson), $"ENTER controlloTimeoutInCorso={controlloTimeoutInCorso} comando={pack?.Comando} token={pack?.Token}");
+
+    if (!controlloTimeoutInCorso)
+    {
+        LogWarn(nameof(SendJson), "Invio bloccato: controllo timeout non attivo.");
+        Console.WriteLine($"⛔ Invio bloccato su {portName}: controllo timeout non attivo.");
+        return;
+    }
+
+    try
+    {
+        gestore.AggiungiRichiesta(pack);
+
+        string json = "\x02" + JsonConvert.SerializeObject(pack) + "\x03";
+        LogInfo(nameof(SendJson), $"SEND >>> {Sanitize(json)}");
+
+        Console.WriteLine($"📤 [{portName}] Inviato: {json}");
+        serialPort.WriteLine(json);
+
+        LogDebug(nameof(SendJson), "WriteLine completata.");
+        Thread.Sleep(100);
+
+        var step = sequencer.GetStepCorrente();
+        if (step != null && step.PacchettoDaInviare == null)
+        {
+            step.PacchettoDaInviare = pack;
+            LogDebug(nameof(SendJson), $"Pacchetto associato allo step corrente: {step.Nome}");
+        }
+
+        LogInfo(nameof(SendJson), "EXIT OK");
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(SendJson), $"FAIL comando={pack?.Comando} token={pack?.Token}", ex);
+        throw;
+    }
+}
+
+private string Sanitize(string text)
+{
+    if (text == null) return "null";
+
+    return text
+        .Replace("\r", "\\r")
+        .Replace("\n", "\\n")
+        .Replace("\x02", "<STX>")
+        .Replace("\x03", "<ETX>");
+}
+
+private void DataReceivedHandler(object sender, SerialDataReceivedEventArgs e)
+{
+    LogDebug(nameof(DataReceivedHandler), "ENTER");
+
+    try
+    {
+        string data = serialPort.ReadExisting();
+        LogInfo(nameof(DataReceivedHandler), $"RAW <<< {Sanitize(data)}");
+
+        buffer.Append(data);
+        LogDebug(nameof(DataReceivedHandler), $"BufferLength={buffer.Length}");
+
+        while (buffer.ToString().Contains("\n"))
+        {
+            string fullLine = buffer.ToString();
+            int index = fullLine.IndexOf('\n');
+            string jsonLine = fullLine.Substring(0, index).Trim();
+            buffer.Remove(0, index + 1);
+
+            LogInfo(nameof(DataReceivedHandler), $"LINE <<< {Sanitize(jsonLine)}");
+
+            try
+            {
+                var pacchetto = JsonConvert.DeserializeObject<Package>(jsonLine);
+
+                if (pacchetto == null)
+                {
+                    LogWarn(nameof(DataReceivedHandler), $"DeserializeObject ha restituito null. line={Sanitize(jsonLine)}");
+                    continue;
+                }
+
+                LogInfo(nameof(DataReceivedHandler),
+                    $"PACKET stato={pacchetto.StatoConversazione} comando={pacchetto.Comando} token={pacchetto.Token}");
+
+                var step = sequencer.GetStepCorrente();
+                if (step != null)
+                {
+                    LogDebug(nameof(DataReceivedHandler),
+                        $"Step corrente nome={step.Nome} attesa={step.TipoRispostaAttesa} completata={step.Completata}");
+                }
+                else
+                {
+                    LogDebug(nameof(DataReceivedHandler), "Nessuno step corrente.");
+                }
+
+                if (step != null &&
+                    step.TipoRispostaAttesa == pacchetto.StatoConversazione &&
+                    (step.ValidatoreRisposta == null || step.ValidatoreRisposta(pacchetto)))
+                {
+                    step.PacchettoRicevuto = pacchetto;
+                    step.Completata = true;
+
+                    LogInfo(nameof(DataReceivedHandler), $"Step completato: {step.Nome}");
+                    Console.WriteLine($"✅ [{portName}] Step completato: {step.Nome}");
+
+                    sequencer.PassaAlProssimo();
+                    LogInfo(nameof(DataReceivedHandler), "Sequencer passato al prossimo step.");
+                }
+
+                var mainForm = Application.OpenForms["Dashboard"] as Dashboard;
+
+                switch (pacchetto.StatoConversazione)
+                {
+                    case "Request":
+                        LogInfo(nameof(DataReceivedHandler), "CASE Request");
+                        Console.WriteLine($"🔁 [{portName}] Richiesta ricevuta.");
+
+                        if (!string.IsNullOrWhiteSpace(pacchetto.Comando))
+                        {
+                            if (pacchetto.Comando == "RichiediStato")
+                            {
+                                var risposta = new Package
+                                {
+                                    Comando = "RichiediStato",
+                                    Token = pacchetto.Token,
+                                    Data = DateTime.Now,
+                                    Messaggio = "Stato: OK",
+                                    StatoConversazione = "Response"
+                                };
+
+                                string rispostaJson = JsonConvert.SerializeObject(risposta);
+                                LogInfo(nameof(DataReceivedHandler), $"SEND RESPONSE >>> {Sanitize(rispostaJson)}");
+
+                                serialPort.WriteLine(rispostaJson);
+                                Console.WriteLine($"📤 [{portName}] Inviata risposta: {rispostaJson}");
+                            }
+                            else
+                            {
+                                LogWarn(nameof(DataReceivedHandler), $"Comando sconosciuto in Request: {pacchetto.Comando}");
+                                Console.WriteLine($"⚠️ [{portName}] Comando sconosciuto: {pacchetto.Comando}");
+                            }
+                        }
+                        break;
+
+                    case "Response":
+                        LogInfo(nameof(DataReceivedHandler), "CASE Response");
+                        Console.WriteLine($"📩 [{portName}] Risposta ricevuta.");
+
+                        if (!string.IsNullOrWhiteSpace(pacchetto.Token) && gestore.ContieneRichiesta(pacchetto.Token))
+                        {
+                            var richiestaOriginale = gestore.RimuoviRichiesta(pacchetto.Token);
+                            LogInfo(nameof(DataReceivedHandler),
+                                $"Risposta correlata a richiesta comando={richiestaOriginale?.Comando} token={pacchetto.Token}");
+
+                            Console.WriteLine($"🔗 [{portName}] Risposta correlata a: {richiestaOriginale.Comando}");
+                        }
+
+                        if (step != null &&
+                            step.TipoRispostaAttesa == "Response" &&
+                            (step.ValidatoreRisposta == null || step.ValidatoreRisposta(pacchetto)))
+                        {
+                            step.PacchettoRicevuto = pacchetto;
+                            step.Completata = true;
+
+                            LogInfo(nameof(DataReceivedHandler), $"Step completato(Response): {step.Nome}");
+                            Console.WriteLine($"✅ [{portName}] Step completato: {step.Nome}");
+
+                            if (string.Equals(pacchetto.Messaggio?.ToString().Trim(), "Configurazione ricevuta", StringComparison.OrdinalIgnoreCase))
+                            {
+                                LogInfo(nameof(DataReceivedHandler), "Messaggio 'Configurazione ricevuta' intercettato.");
+
+                                var sessione = CollaudoManager.Istanza.GetSessionePerBasetta(portName);
+
+                                if (!Mode.DEBUG)
+                                {
+                                    bool modbusConnected = RobotController.Instance.IsModbusConnected();
+                                    LogInfo(nameof(DataReceivedHandler), $"Robot Modbus connected={modbusConnected}");
+
+                                    if (modbusConnected)
+                                    {
+                                        LogInfo(nameof(DataReceivedHandler), $"Trigger Modbus start per basetta={sessione?.IdBasetta}");
+
+                                        switch (sessione.IdBasetta)
+                                        {
+                                            case "VCL":
+                                                LogInfo(nameof(DataReceivedHandler), "WriteRegister VCL_Start=1");
+                                                RobotController.Instance.WriteRegister(Registers.VCL_Start, 1);
+                                                ScriviDopoDelay(Registers.VCL_End, 0, 5000);
+                                                break;
+
+                                            case "VMSMF":
+                                                LogInfo(nameof(DataReceivedHandler), "WriteRegister VMSMF_Start=1");
+                                                RobotController.Instance.WriteRegister(Registers.VMSMF_Start, 1);
+                                                ScriviDopoDelay(Registers.VMSMF_End, 0, 5000);
+                                                break;
+
+                                            case "VCO":
+                                                LogInfo(nameof(DataReceivedHandler), "WriteRegister VCO_Start=1");
+                                                RobotController.Instance.WriteRegister(Registers.VCO_Start, 1);
+                                                ScriviDopoDelay(Registers.VCO_End, 0, 5000);
+                                                break;
+
+                                            case "FCO":
+                                                LogInfo(nameof(DataReceivedHandler), "WriteRegister FCO_Start=1");
+                                                RobotController.Instance.WriteRegister(Registers.FCO_Start, 1);
+                                                ScriviDopoDelay(Registers.FCO_End, 0, 5000);
+                                                break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            var next = sequencer.GetStepCorrente();
+                            if (next?.PacchettoDaInviare != null)
+                            {
+                                LogInfo(nameof(DataReceivedHandler), $"Invio prossimo step: {next.Nome}");
+                                SendJson(next.PacchettoDaInviare);
+                            }
+                        }
+
+                        if (pacchetto.Comando == "TestResult")
+                        {
+                            LogInfo(nameof(DataReceivedHandler), "CASE TestResult");
+                            HandleTestResult(pacchetto, mainForm);
+                        }
+
+                        break;
+
+                    case "Acknowledge":
+                        LogInfo(nameof(DataReceivedHandler),
+                            $"ACK comando={pacchetto.Comando} token={pacchetto.Token}");
+                        Console.WriteLine($"📥 [{portName}] ACK per: {pacchetto.Comando}, token: {pacchetto.Token}");
+                        break;
+
+                    case "Error":
+                        LogWarn(nameof(DataReceivedHandler),
+                            $"Errore ricevuto comando={pacchetto.Comando} token={pacchetto.Token} msg={pacchetto.Messaggio}");
+                        Console.WriteLine($"⚠️ [{portName}] Errore ricevuto.");
+                        break;
+
+                    default:
+                        LogWarn(nameof(DataReceivedHandler), $"Stato sconosciuto: {pacchetto.StatoConversazione}");
+                        Console.WriteLine($"❓ [{portName}] Stato sconosciuto: {pacchetto.StatoConversazione}");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError(nameof(DataReceivedHandler), $"Errore JSON. line={Sanitize(jsonLine)}", ex);
+                Console.WriteLine($"❌ [{portName}] Errore JSON: {ex.Message}");
+                Console.WriteLine("Contenuto: " + jsonLine);
+            }
+        }
+
+        LogDebug(nameof(DataReceivedHandler), "EXIT");
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(DataReceivedHandler), "Errore lettura seriale.", ex);
+        Console.WriteLine($"❌ [{portName}] Errore lettura seriale: {ex.Message}");
+    }
+}
+
+private void HandleTestResult(Package pacchetto, Dashboard mainForm)
+{
+    LogInfo(nameof(HandleTestResult), $"ENTER comando={pacchetto?.Comando} token={pacchetto?.Token}");
+
+    bool result = false;
+    var sessione = CollaudoManager.Istanza.GetSessionePerBasetta(portName);
+
+    if (sessione == null)
+    {
+        LogWarn(nameof(HandleTestResult), "Sessione nulla.");
+        return;
+    }
+
+    try
+    {
+        LogDebug(nameof(HandleTestResult), $"Sessione idBasetta={sessione.IdBasetta} identification={sessione.Identification}");
+
+        var risultati = ((JObject)pacchetto.Risultati).ToObject<RisultatiTest>();
+
+        if (risultati == null)
+        {
+            LogWarn(nameof(HandleTestResult), "Deserializzazione Risultati fallita.");
+            Console.WriteLine("⚠️ Deserializzazione 'Risultati' fallita.");
+            sessione.PezziKO++;
+            return;
+        }
+
+        LogInfo(nameof(HandleTestResult),
+            $"Risultati esito={risultati.Esito} coil={risultati.CoilTon} freq={risultati.Freq} led={risultati.Led}");
+
+        result = risultati.Esito == "PASS";
+
+        if (!Mode.DEBUG && RobotController.Instance.IsModbusConnected())
+        {
+            var endValue = result ? (ushort)1 : (ushort)2;
+            LogInfo(nameof(HandleTestResult), $"Scrittura END Modbus endValue={endValue} basetta={sessione.IdBasetta}");
+
+            switch (sessione.IdBasetta)
+            {
+                case "VCL":
+                    RobotController.Instance.WriteRegister(Registers.VCL_End, endValue);
+                    break;
+                case "VMSMF":
+                    RobotController.Instance.WriteRegister(Registers.VMSMF_End, endValue);
+                    break;
+                case "VCO":
+                    RobotController.Instance.WriteRegister(Registers.VCO_End, endValue);
+                    break;
+                case "FCO":
+                    RobotController.Instance.WriteRegister(Registers.FCO_End, endValue);
+                    break;
+            }
+        }
+
+        if (result)
+        {
+            LogInfo(nameof(HandleTestResult), "Esito PASS");
+            HandlePassResult(sessione, risultati, mainForm);
+        }
+        else
+        {
+            LogWarn(nameof(HandleTestResult), "Esito FAIL");
+            HandleFailResult(sessione, risultati, mainForm);
+        }
+
+        LogInfo(nameof(HandleTestResult),
+            $"Progressi: totale={sessione.TotaleTestati}/{sessione.PezziDaCollaudare} ok={sessione.PezziOK} ko={sessione.PezziKO}");
+
+        if (sessione.Completata)
+        {
+            LogInfo(nameof(HandleTestResult), $"Sessione COMPLETATA per basetta={sessione.IdBasetta}");
+            Console.WriteLine($"✅ [{portName}] Sessione COMPLETATA!");
+
+            GlobalClass.OccupiedTray.Remove(sessione.VassoioDeposito);
+            GlobalClass.OccupiedTray.Remove(sessione.VassoioPrelievo);
+            mainForm?.AggiornaUserControl(sessione.IdBasetta);
+        }
+        else
+        {
+            LogInfo(nameof(HandleTestResult), $"Sessione non completata. Avvio prossimo ciclo. basetta={sessione.IdBasetta}");
+            AvviaNuovoCiclo(sessione, mainForm);
+        }
+
+        LogInfo(nameof(HandleTestResult), "EXIT OK");
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(HandleTestResult), "Errore parsing o gestione TestResult.", ex);
+        Console.WriteLine($"❌ Errore parsing TestResult: {ex.Message}");
+        sessione.PezziKO++;
+    }
+}
+
+public void ScriviDopoDelay(ushort registro, ushort valore, int delayMs)
+{
+    LogInfo(nameof(ScriviDopoDelay), $"Schedulata write registro={registro} valore={valore} delayMs={delayMs}");
+
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await Task.Delay(delayMs);
+            LogInfo(nameof(ScriviDopoDelay), $"Eseguo write ritardata registro={registro} valore={valore}");
+            RobotController.Instance.WriteRegister(registro, valore);
+            LogInfo(nameof(ScriviDopoDelay), $"Write ritardata completata registro={registro} valore={valore}");
+            Console.WriteLine($"⏱️ Registro {registro} scritto con {valore} dopo {delayMs}ms");
+        }
+        catch (Exception ex)
+        {
+            LogError(nameof(ScriviDopoDelay), $"Errore write ritardata registro={registro} valore={valore}", ex);
+        }
+    });
+}
+
+private void StampResultDEBUG(RisultatiTest risultati)
+{
+    try
+    {
+        string json = JsonConvert.SerializeObject(risultati, Formatting.Indented);
+        LogInfo(nameof(StampResultDEBUG), $"RisultatiTest={json}");
+        Console.WriteLine(json);
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(StampResultDEBUG), "Errore serializzazione risultati.", ex);
+    }
+}
+
+private void SaveRecordOnDB(SessioneTest sessione, RisultatiTest risultato)
+{
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    LogInfo(nameof(SaveRecordOnDB),
+        $"ENTER identification={sessione?.Identification} idBasetta={sessione?.IdBasetta} esito={risultato?.Esito}");
+
+    try
+    {
+        using (var connection = new MySqlConnection(DB.ConnectionString))
+        {
+            connection.Open();
+            LogInfo(nameof(SaveRecordOnDB), "Connessione DB aperta.");
+
+            string insertSessionQuery = @"
+            INSERT INTO sessione_test
+            (identification, id_basetta, vassoio_deposito, vassoio_prelievo,
+             pezzi_da_collaudare, pezzi_ok, pezzi_ko, completata)
+            VALUES (@identification, @id_basetta, @vassoio_deposito, @vassoio_prelievo,
+                    @pezzi_da_collaudare, @pezzi_ok, @pezzi_ko, @completata);
+            SELECT LAST_INSERT_ID();";
+
+            int sessioneId;
+            using (var cmd = new MySqlCommand(insertSessionQuery, connection))
+            {
+                cmd.Parameters.AddWithValue("@identification", sessione.Identification);
+                cmd.Parameters.AddWithValue("@id_basetta", sessione.IdBasetta);
+                cmd.Parameters.AddWithValue("@vassoio_deposito", sessione.VassoioDeposito);
+                cmd.Parameters.AddWithValue("@vassoio_prelievo", sessione.VassoioPrelievo);
+                cmd.Parameters.AddWithValue("@pezzi_da_collaudare", sessione.PezziDaCollaudare);
+                cmd.Parameters.AddWithValue("@pezzi_ok", sessione.PezziOK);
+                cmd.Parameters.AddWithValue("@pezzi_ko", sessione.PezziKO);
+                cmd.Parameters.AddWithValue("@completata", sessione.Completata);
+
+                sessioneId = Convert.ToInt32(cmd.ExecuteScalar());
+                LogInfo(nameof(SaveRecordOnDB), $"Insert sessione OK sessioneId={sessioneId}");
+            }
+
+            string insertResultQuery = @"
+            INSERT INTO risultati_test
+            (sessione_id, coil_ton, freq, led, gate_ton, esito, dut_code, indirizzo)
+            VALUES (@sessione_id, @coil_ton, @freq, @led, @gate_ton, @esito, @dut_code, @indirizzo)";
+
+            using (var cmd = new MySqlCommand(insertResultQuery, connection))
+            {
+                cmd.Parameters.AddWithValue("@sessione_id", sessioneId);
+                cmd.Parameters.AddWithValue("@coil_ton", risultato.CoilTon);
+                cmd.Parameters.AddWithValue("@freq", risultato.Freq);
+                cmd.Parameters.AddWithValue("@led", risultato.Led);
+                cmd.Parameters.AddWithValue("@gate_ton", risultato.GateTon);
+                cmd.Parameters.AddWithValue("@esito", risultato.Esito);
+                cmd.Parameters.AddWithValue("@dut_code", risultato.DutCode);
+                cmd.Parameters.AddWithValue("@indirizzo", risultato.Indirizzo);
+                cmd.ExecuteNonQuery();
+
+                LogInfo(nameof(SaveRecordOnDB), $"Insert risultati_test OK sessioneId={sessioneId}");
+            }
+        }
+
+        LogInfo(nameof(SaveRecordOnDB), $"EXIT OK elapsed={sw.ElapsedMilliseconds}ms");
+    }
+    catch (Exception ex)
+    {
+        LogError(nameof(SaveRecordOnDB), $"FAIL elapsed={sw.ElapsedMilliseconds}ms", ex);
+        throw;
+    }
+}
+
+private ushort _MappingCodsc(string cod)
+{
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    LogInfo(nameof(_MappingCodsc), $"ENTER cod={cod}");
+
+    using (MySqlConnection connection = new MySqlConnection(DB.ConnectionString))
+    {
+        try
+        {
+            connection.Open();
+            LogInfo(nameof(_MappingCodsc), "Connessione DB aperta.");
+
+            string query = "SELECT map FROM config WHERE Codice_scheda = @cod;";
+
+            using (MySqlCommand command = new MySqlCommand(query, connection))
+            {
+                command.Parameters.AddWithValue("@cod", cod);
+
+                using (MySqlDataReader reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        ushort value = Convert.ToUInt16(reader["map"]);
+                        LogInfo(nameof(_MappingCodsc), $"EXIT OK map={value} elapsed={sw.ElapsedMilliseconds}ms");
+                        return value;
+                    }
+                }
+            }
+        }
+        catch (MySqlException mysqlEx)
+        {
+            LogError(nameof(_MappingCodsc), $"MySqlException cod={cod}", mysqlEx);
+        }
+        catch (Exception ex)
+        {
+            LogError(nameof(_MappingCodsc), $"Exception cod={cod}", ex);
+            MessageBox.Show($"Errore: {ex}");
+        }
+        finally
+        {
+            try { connection.Close(); } catch { }
+        }
+    }
+
+    LogWarn(nameof(_MappingCodsc), $"Nessuna mappatura trovata per cod={cod}");
+    return 0;
+}
